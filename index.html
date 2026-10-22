@@ -178,6 +178,18 @@ table.tbl{width:100%;border-collapse:collapse;font-size:14px;font-variant-numeri
 .wlist .wi{display:flex;align-items:center;justify-content:space-between;padding:10px 4px;border-bottom:1px solid rgba(255,255,255,.05)}
 .wlist .wi:last-child{border-bottom:0}
 .inband{color:var(--green)}.outband{color:var(--accent2)}
+.grip{color:#4a525e;font-size:15px;line-height:28px;margin:1px -3px 0 -4px;flex:none;-webkit-user-select:none;user-select:none}
+[data-sort-item]{-webkit-touch-callout:none}
+.exHead,.last,.sug .t,.exNote,.setsHead,.plist .n,.plist .grip{-webkit-user-select:none;user-select:none}
+[data-sort-item].pressing{transform:scale(.985);transition:transform .25s ease}
+.drag-ph{border:2px dashed rgba(255,122,26,.55);border-radius:var(--r);background:rgba(255,122,26,.06);list-style:none;box-sizing:border-box}
+.plist .drag-ph{border-radius:12px}
+.dragging{position:fixed;z-index:45;pointer-events:none;box-shadow:0 18px 40px rgba(0,0,0,.65),0 0 0 2px var(--accent);transform:scale(1.03);opacity:.97;transition:transform .15s ease,box-shadow .15s ease}
+.plist li.dragging{background:#2a3039}
+#exList.sorting .ex>:not(.exHead){display:none}
+#exList.sorting .ex{padding:10px}
+#exList.sorting .ex .exHead .chip,#exList.sorting .ex .exHead .icon{visibility:hidden}
+body.dragActive{-webkit-user-select:none;user-select:none;cursor:grabbing}
 #toast{position:fixed;left:50%;top:calc(var(--safeT) + 14px);transform:translate(-50%,-150%);background:#2b313a;color:var(--text);padding:11px 18px;border-radius:14px;font-weight:650;z-index:60;transition:transform .25s;box-shadow:0 8px 24px rgba(0,0,0,.45);max-width:90vw;text-align:center}
 #toast.show{transform:translate(-50%,0)}
 .back{font-size:28px;line-height:1;width:40px;height:40px;margin-left:-8px;color:var(--accent2)}
@@ -271,7 +283,8 @@ const SEED_SESSION = {
 function defaultState() {
   return {
     v: 1,
-    settings: { rest: 90, sound: true, vibrate: true, wakeLock: true, bandLo: 85, bandHi: 87, inc: 2.5, lastBackup: null },
+    settings: { rest: 90, sound: true, vibrate: true, wakeLock: true, bandLo: 85, bandHi: 87, inc: 2.5, lastBackup: null,
+      notify: true, notifAsked: false, ntfy: false, ntfyTopic: null, dragHintSeen: false, stepV2: true },
     lib: clone(DEFAULT_LIB), plans: clone(DEFAULT_PLANS),
     sessions: [clone(SEED_SESSION)],
     bw: [{ date: '2026-10-20', kg: 89 }],
@@ -285,7 +298,7 @@ function load() {
   let raw = null;
   try { raw = localStorage.getItem(KEY); } catch (e) { /* privat-modus */ }
   if (!raw) { state = defaultState(); save(); return; }
-  try { state = normalize(JSON.parse(raw)); }
+  try { state = normalize(JSON.parse(raw)); save(); }
   catch (e) {
     try { localStorage.setItem(KEY + '.corrupt.' + Date.now(), raw); } catch (_) {}
     state = defaultState(); save();
@@ -295,16 +308,27 @@ function load() {
 function normalize(s) {
   const d = defaultState();
   if (!s || typeof s !== 'object' || !Array.isArray(s.sessions)) throw new Error('Ungültiges Format');
-  return {
+  const settings = Object.assign(d.settings, { stepV2: false }, s.settings || {});
+  const out = {
     v: 1,
-    settings: Object.assign(d.settings, s.settings || {}),
+    settings,
     lib: Object.assign({}, s.lib || d.lib),
     plans: Array.isArray(s.plans) && s.plans.length ? s.plans : d.plans,
     sessions: s.sessions.filter(x => x && x.date && Array.isArray(x.ex)),
     bw: Array.isArray(s.bw) ? s.bw.filter(x => x && x.date && typeof x.kg === 'number') : [],
     active: s.active && Array.isArray(s.active.ex) ? s.active : null,
   };
+  return migrate(out);
 }
+/** v1.1: Standard-Schrittweite ist jetzt 0,5 kg. Alte gespeicherte 2,5 (= alter Standard) zurücksetzen. */
+function migrate(s) {
+  if (!s.settings.stepV2) {
+    for (const k in s.lib) if (s.lib[k] && s.lib[k].step === 2.5) delete s.lib[k].step;
+    s.settings.stepV2 = true;
+  }
+  return s;
+}
+const DEFAULT_STEP = 0.5;
 function save() {
   try { localStorage.setItem(KEY, JSON.stringify(state)); }
   catch (e) { toast('Speichern fehlgeschlagen – bitte Backup exportieren!'); }
@@ -513,7 +537,10 @@ function viewSession() {
     <div class="progress"><div id="progFill" style="width:${st.all ? st.done / st.all * 100 : 0}%"></div></div>
   </div>`;
   if (!a.ex.length) h += `<div class="empty">Noch keine Übungen.<br>Füge unten eine hinzu.</div>`;
+  if (a.ex.length > 1 && !state.settings.dragHintSeen) h += `<div class="hint" id="dragHint">↕️ Tipp: Übung <b>gedrückt halten</b> und ziehen, um die Reihenfolge zu ändern.</div>`;
+  h += `<div id="exList" data-sort-list="session">`;
   a.ex.forEach((e, i) => { h += exCard(e, i); });
+  h += `</div>`;
   h += `<button class="btn block" data-a="addEx">＋ Übung hinzufügen</button>
     <button class="btn block green big" data-a="finish">${a.editingId ? 'Änderungen speichern' : 'Training beenden ✓'}</button>
     <button class="btn block danger" data-a="discard">${a.editingId ? 'Bearbeitung abbrechen' : 'Training verwerfen'}</button>`;
@@ -535,12 +562,12 @@ function exCard(e, i) {
   } else if (mention && mention.ex.skipped) {
     last = `Am ${fmtDate(mention.session.date)} verschoben${L.base ? ` · Startwerte: <b>${baseStr(L)}</b>` : ''}`;
   } else last = L.base ? `Noch kein Log · Startwerte: <b>${baseStr(L)}</b>` : 'Neue Übung – noch keine Daten';
-  let h = `<div class="card ex ${complete ? 'complete' : ''} ${e.skipped ? 'skipped' : ''}" id="ex-${e.id}" data-ex="${e.id}">
+  let h = `<div class="card ex ${complete ? 'complete' : ''} ${e.skipped ? 'skipped' : ''}" id="ex-${e.id}" data-ex="${e.id}" data-sort-item>
     <div class="exHead">
-      <div class="exTitle"><span class="exNum">${complete ? '✓' : i + 1}</span>
+      <div class="exTitle"><span class="grip" aria-hidden="true">⠿</span><span class="exNum">${complete ? '✓' : i + 1}</span>
         <div style="min-width:0"><div class="exName">${esc(e.name)}</div>
         ${bw || L.perSide ? `<div style="margin-top:3px">${bw ? '<span class="tag or">Körpergewicht + Zusatz</span>' : ''}${L.perSide ? '<span class="tag">je Seite</span>' : ''}</div>` : ''}</div></div>
-      ${e.skipped ? '' : `<button class="chip" data-a="step" aria-label="Schrittweite">±${fmtN(L.step || 2.5)}</button>`}
+      ${e.skipped ? '' : `<button class="chip" data-a="step" aria-label="Schrittweite">±${fmtN(L.step || DEFAULT_STEP)}</button>`}
       <button class="icon" data-a="exMenu" aria-label="Optionen">⋯</button>
     </div>
     <div class="last">${last}</div>`;
@@ -593,7 +620,8 @@ function planSheet() {
   return `<h3>${esc(p.day)} bearbeiten</h3>
   <label class="field"><span>Titel</span><input class="inp" id="pTitle" value="${esc(p.title)}"></label>
   <div class="field"><span>Übungen (Reihenfolge)</span></div>
-  <ul class="plist">${p.ex.map((n, i) => `<li><span class="n">${esc(n)}</span>
+  <div class="tiny muted" style="margin:-4px 2px 8px">Gedrückt halten & ziehen – oder Pfeile nutzen.</div>
+  <ul class="plist" data-sort-list="plan">${p.ex.map((n, i) => `<li data-sort-item data-n="${esc(n)}"><span class="grip" aria-hidden="true">⠿</span><span class="n">${esc(n)}</span>
     <button class="icon" data-a="pUp" data-i="${i}" ${i ? '' : 'disabled style="opacity:.3"'} aria-label="hoch">↑</button>
     <button class="icon" data-a="pDown" data-i="${i}" ${i < p.ex.length - 1 ? '' : 'disabled style="opacity:.3"'} aria-label="runter">↓</button>
     <button class="icon" data-a="pDel" data-i="${i}" style="color:var(--red)" aria-label="entfernen">✕</button></li>`).join('') || '<li class="muted">Keine Übungen</li>'}</ul>
@@ -819,6 +847,45 @@ function viewBW() {
 }
 
 /* ----- Mehr / Einstellungen ----- */
+const APP_VERSION = '1.1';
+function notifSection() {
+  const S = state.settings, p = notifPerm();
+  const st = {
+    granted: '<span class="inband">Erlaubt ✓</span>',
+    denied: '<span style="color:var(--red)">Blockiert</span>',
+    default: '<span class="outband">Noch nicht erlaubt</span>',
+    unsupported: '<span class="muted">Nicht verfügbar</span>',
+  }[p];
+  let h = `<h2>Mitteilung bei Pausenende</h2><div class="card">
+    <div class="row between"><span style="font-weight:600">Status</span><span id="notifStatus" style="font-weight:700">${st}</span></div>`;
+  if (p === 'default') h += `<button class="btn block primary" style="margin-top:12px" data-a="notifAllow">🔔 Mitteilungen erlauben</button>`;
+  if (p === 'granted') h += `<label class="chk" style="justify-content:space-between"><span>Mitteilung bei Pausenende</span><input type="checkbox" data-in="set_notify" ${S.notify ? 'checked' : ''}></label>
+    <button class="btn block" data-a="notifTest">Test-Mitteilung senden</button>`;
+  if (p === 'denied') h += `<p class="small muted" style="margin:10px 0 0">Wieder einschalten: iPhone-<b style="color:var(--text)">Einstellungen → Mitteilungen → Gym</b> → Mitteilungen erlauben.</p>`;
+  if (p === 'unsupported') h += `<p class="small muted" style="margin:10px 0 0">${isIOS() && !isStandalone() ? 'Auf dem iPhone gehen Mitteilungen nur, wenn die App über <b style="color:var(--text)">Teilen → Zum Home-Bildschirm</b> installiert ist und von dort geöffnet wird.' : 'Dieser Browser unterstützt keine Mitteilungen.'}</p>`;
+  h += `<p class="tiny muted" style="margin:12px 0 0">Wichtig fürs iPhone: Solange die App offen ist (Bildschirm an), kommt die Mitteilung pünktlich. Ist die App im Hintergrund oder das Handy gesperrt, friert iOS die App ein – die Mitteilung kommt dann erst, wenn du sie wieder öffnest. Für pünktliche Mitteilungen auch bei gesperrtem Handy: siehe unten.</p></div>`;
+
+  h += `<h2>Auch bei gesperrtem Handy (optional)</h2><div class="card">`;
+  if (!S.ntfyTopic) {
+    h += `<p class="small muted" style="margin:0 0 12px">Über den kostenlosen Push-Dienst <b style="color:var(--text)">ntfy.sh</b> kommt die Mitteilung pünktlich, auch wenn das Handy gesperrt ist. Kein Konto nötig – nur die kostenlose App <b style="color:var(--text)">„ntfy“</b> aus dem App Store.</p>
+      <button class="btn block" data-a="ntfySetup">Einrichten</button>`;
+  } else {
+    h += `<label class="chk" style="justify-content:space-between;margin-top:-6px"><span>Pausenende über ntfy senden</span><input type="checkbox" data-in="set_ntfy" ${S.ntfy ? 'checked' : ''}></label>
+      <ol class="small" style="margin:6px 0 12px;padding-left:20px;color:#c8d0da;line-height:1.55">
+        <li>App <b>„ntfy“</b> aus dem App Store laden (kostenlos, ohne Konto).</li>
+        <li>In ntfy auf <b>＋</b> tippen und dieses Thema eintragen:</li>
+      </ol>
+      <div class="row"><input class="inp" id="ntfyTopic" readonly value="${esc(S.ntfyTopic)}" style="font-family:ui-monospace,Menlo,monospace;font-size:14px"><button class="btn" data-a="ntfyCopy">Kopieren</button></div>
+      <ol class="small" start="3" style="margin:12px 0 12px;padding-left:20px;color:#c8d0da;line-height:1.55">
+        <li>„Abonnieren“ tippen und Mitteilungen für ntfy erlauben.</li>
+        <li>Test: Knopf drücken, Handy sperren – nach 15 s kommt die Mitteilung.</li>
+      </ol>
+      <button class="btn block primary" data-a="ntfyTest">Test in 15 s senden</button>
+      <button class="btn block danger" data-a="ntfyOff">Entfernen</button>
+      <p class="tiny muted" style="margin:4px 0 0">Gesendet wird nur „Pause vorbei“ und die nächste Übung, über den öffentlichen Server ntfy.sh. Das zufällige Thema wirkt wie ein Passwort – nicht weitergeben. Ist die App offen, kommt stattdessen die normale Mitteilung (keine doppelte).</p>`;
+  }
+  return h + `</div>`;
+}
 function viewMore() {
   setHeader('Mehr');
   const S = state.settings;
@@ -828,6 +895,7 @@ function viewMore() {
       <div class="stepper" style="width:170px"><button data-a="restAdj" data-v="-15" aria-label="kürzer">−</button><input readonly value="${mmss(S.rest)}" id="restVal" aria-label="Pausenzeit"><button data-a="restAdj" data-v="15" aria-label="länger">+</button></div></div>
     ${tg('sound', 'Ton am Ende der Pause')}${tg('vibrate', 'Vibration (nur Android)')}${tg('wakeLock', 'Bildschirm im Training anlassen')}
   </div>
+  ${notifSection()}
   <h2>Ziele & Vorschläge</h2><div class="card">
     <div class="row between"><span style="font-weight:600">Gewichts-Ziel</span>
       <div class="row" style="gap:6px"><input class="inp" style="width:68px;text-align:center;padding:0" inputmode="decimal" data-in="bandLo" value="${fmtN(S.bandLo, 1)}" aria-label="Ziel von">–<input class="inp" style="width:68px;text-align:center;padding:0" inputmode="decimal" data-in="bandHi" value="${fmtN(S.bandHi, 1)}" aria-label="Ziel bis"> kg</div></div>
@@ -850,11 +918,12 @@ function viewMore() {
     <button class="btn block" data-a="resetPlans">Trainingspläne auf Standard zurücksetzen</button>
     <button class="btn block danger" data-a="wipe">Alle Daten löschen</button>
   </div>
-  <div class="tiny muted" style="text-align:center;margin-top:8px">Gym Tracker · Version 1.0</div>`;
+  <div class="tiny muted" style="text-align:center;margin-top:8px">Gym Tracker · Version ${APP_VERSION}</div>`;
 }
 
 /* ---------- Pausentimer ---------- */
-const T = { end: 0, total: 0, alerted: false, overAt: 0 };
+// Zeitstempel-basiert: läuft korrekt weiter, auch wenn iOS die App im Hintergrund einfriert.
+const T = { end: 0, total: 0, alerted: false, overAt: 0, body: '', ntfy: null, ntfyAt: 0 };
 let audioCtx = null;
 function unlockAudio() {
   try { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); if (audioCtx.state === 'suspended') audioCtx.resume(); } catch (e) {}
@@ -862,6 +931,7 @@ function unlockAudio() {
 function beep() {
   if (!state.settings.sound || !audioCtx) return;
   try {
+    if (audioCtx.state === 'suspended') audioCtx.resume();
     [0, 0.22, 0.44].forEach((d, i) => {
       const o = audioCtx.createOscillator(), g = audioCtx.createGain(); const t0 = audioCtx.currentTime + d;
       o.frequency.value = i === 2 ? 1320 : 880; o.type = 'sine';
@@ -870,36 +940,125 @@ function beep() {
     });
   } catch (e) {}
 }
-function persistTimer() { try { T.end ? localStorage.setItem(KEY + '.timer', JSON.stringify({ end: T.end, total: T.total })) : localStorage.removeItem(KEY + '.timer'); } catch (e) {} }
-function startTimer(sec) {
-  T.total = sec; T.end = Date.now() + sec * 1000; T.alerted = false; persistTimer();
-  $('#timer').classList.add('show'); $('#timer').classList.remove('over'); document.body.classList.add('timerOn');
-  tickTimer();
+function persistTimer() {
+  try {
+    T.end ? localStorage.setItem(KEY + '.timer', JSON.stringify({ end: T.end, total: T.total, body: T.body, ntfy: T.ntfy, ntfyAt: T.ntfyAt }))
+          : localStorage.removeItem(KEY + '.timer');
+  } catch (e) {}
 }
-function stopTimer() { T.end = 0; persistTimer(); $('#timer').classList.remove('show', 'over'); document.body.classList.remove('timerOn'); }
+function nextSetText(curEx) {
+  const a = state.active; if (!a) return '';
+  const i = Math.max(0, a.ex.indexOf(curEx));
+  for (const e of a.ex.slice(i).concat(a.ex.slice(0, i))) {
+    if (e.skipped) continue;
+    const k = e.sets.findIndex(s => !s.done);
+    if (k >= 0) { const s = e.sets[k], bw = !!lib(e.name).bw; return `Weiter: ${e.name} · Satz ${k + 1} (${bw && !s.w ? s.r + ' Wdh.' : wLabel(s.w, bw) + ' kg × ' + s.r})`; }
+  }
+  return 'Alle Sätze erledigt – Training beenden?';
+}
+function startTimer(sec, body) {
+  T.total = sec; T.end = Date.now() + sec * 1000; T.alerted = false; T.body = body || T.body || 'Weiter geht’s!';
+  $('#timer').classList.add('show'); $('#timer').classList.remove('over'); document.body.classList.add('timerOn');
+  persistTimer(); ntfySchedule(); tickTimer();
+}
+function stopTimer() {
+  ntfyCancel();
+  T.end = 0; persistTimer(); $('#timer').classList.remove('show', 'over'); document.body.classList.remove('timerOn');
+}
+function timerDue(lateMs) {
+  T.alerted = true; T.overAt = Date.now();
+  const el = $('#timer');
+  el.classList.add('over'); el.querySelector('.tfill').style.width = '100%';
+  $('#tTime').textContent = 'Los geht’s! 💪';
+  $('#tLabel').textContent = lateMs > 5000 ? `Pause vorbei · seit ${mmss(lateMs / 1000)}` : 'Pause vorbei';
+  if (state.settings.vibrate && navigator.vibrate && !(navigator.userActivation && !navigator.userActivation.hasBeenActive)) { try { navigator.vibrate([300, 120, 300, 120, 500]); } catch (e) {} }
+  beep();
+  // Mitteilung: nicht doppelt, wenn ntfy sie im Hintergrund schon zugestellt hat
+  const ntfyDelivered = T.ntfy === 'scheduled' && Date.now() >= T.ntfyAt;
+  if (!ntfyDelivered) showRestNotification(T.body);
+  persistTimer();
+}
 function tickTimer() {
   if (!T.end) return;
-  const rem = (T.end - Date.now()) / 1000;
+  const now = Date.now(), rem = (T.end - now) / 1000;
   const el = $('#timer');
   if (rem > 0) {
     $('#tTime').textContent = mmss(rem); $('#tLabel').textContent = 'Pause';
     el.querySelector('.tfill').style.width = Math.max(0, Math.min(100, rem / T.total * 100)) + '%';
-  } else if (!T.alerted) {
-    T.alerted = true; T.overAt = Date.now();
-    el.classList.add('over'); $('#tTime').textContent = 'Los geht’s! 💪'; $('#tLabel').textContent = 'Pause vorbei';
-    el.querySelector('.tfill').style.width = '100%';
-    if (state.settings.vibrate && navigator.vibrate) { try { navigator.vibrate([300, 120, 300, 120, 500]); } catch (e) {} }
-    beep();
-  } else if (Date.now() - T.overAt > 6000) stopTimer();
+    // App ist offen: lokale Mitteilung reicht → geplante ntfy-Mitteilung kurz vorher stornieren (keine Doppelung)
+    if (rem <= 2.5 && T.ntfy === 'scheduled' && document.visibilityState === 'visible') ntfyCancel();
+  } else if (!T.alerted) timerDue(now - T.end);
+  else if (now - T.overAt > 6000) stopTimer();
 }
 function restoreTimer() {
   try {
     const t = JSON.parse(localStorage.getItem(KEY + '.timer') || 'null');
-    if (t && t.end > Date.now() && state.active) { T.end = t.end; T.total = t.total; T.alerted = false; $('#timer').classList.add('show'); document.body.classList.add('timerOn'); tickTimer(); }
-    else localStorage.removeItem(KEY + '.timer');
+    if (!t || !state.active) { localStorage.removeItem(KEY + '.timer'); return; }
+    Object.assign(T, { end: t.end, total: t.total, body: t.body || '', ntfy: t.ntfy || null, ntfyAt: t.ntfyAt || 0, alerted: false });
+    if (t.end > Date.now() || Date.now() - t.end < 10 * 60000) {   // läuft noch oder ist erst kürzlich abgelaufen (App wurde neu geladen)
+      $('#timer').classList.add('show'); document.body.classList.add('timerOn'); tickTimer();
+    } else { T.end = 0; localStorage.removeItem(KEY + '.timer'); }
   } catch (e) {}
 }
 setInterval(() => { tickTimer(); tickElapsed(); }, 250);
+
+/* ---------- Mitteilungen (Notification API über Service Worker) ---------- */
+const isStandalone = () => navigator.standalone === true || (window.matchMedia && matchMedia('(display-mode: standalone)').matches);
+const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const notifSupported = () => 'Notification' in window;
+const notifPerm = () => notifSupported() ? Notification.permission : 'unsupported';
+async function askNotifPermission() {
+  state.settings.notifAsked = true; save();
+  if (!notifSupported()) {
+    toast(isIOS() && !isStandalone() ? 'Nur in der App vom Home-Bildschirm möglich' : 'Mitteilungen werden hier nicht unterstützt');
+    return 'unsupported';
+  }
+  let p;
+  try { p = await Notification.requestPermission(); } catch (e) { p = Notification.permission; }
+  if (p === 'granted') { state.settings.notify = true; save(); toast('Mitteilungen aktiviert ✓'); }
+  else if (p === 'denied') toast('Mitteilungen blockiert – in den iPhone-Einstellungen änderbar');
+  return p;
+}
+async function showRestNotification(body, title = 'Pause vorbei 💪') {
+  if (!state.settings.notify || notifPerm() !== 'granted') return false;
+  const opts = { body: body || 'Weiter geht’s!', tag: 'gym-rest', renotify: true, silent: false, vibrate: [300, 120, 300], data: { url: location.href.split('#')[0] } };
+  try {
+    if ('serviceWorker' in navigator) {
+      const reg = await Promise.race([navigator.serviceWorker.getRegistration(), new Promise(r => setTimeout(() => r(null), 1500))]);
+      if (reg && reg.showNotification) { await reg.showNotification(title, opts); return true; }
+    }
+  } catch (e) {}
+  try { new Notification(title, opts); return true; } catch (e) { return false; }   // Fallback (z. B. ohne Service Worker)
+}
+
+/* ---------- Optional: echte Hintergrund-Mitteilung über ntfy.sh (kein Konto, Thema = Zufallsgeheimnis auf dem Gerät) ---------- */
+const NTFY = 'https://ntfy.sh';
+const hdrEnc = s => /^[\x20-\x7e]*$/.test(s) ? s : '=?UTF-8?B?' + btoa(String.fromCharCode(...new TextEncoder().encode(s))) + '?=';
+function newTopic() { const a = new Uint8Array(15); crypto.getRandomValues(a); return 'gym-' + [...a].map(b => 'abcdefghijkmnpqrstuvwxyz23456789'[b % 32]).join(''); }
+function ntfyPost(path, body, headers) {
+  return fetch(`${NTFY}/${state.settings.ntfyTopic}${path}`, { method: 'POST', body, headers, keepalive: true });
+}
+async function ntfySchedule() {
+  const S = state.settings;
+  if (!S.ntfy || !S.ntfyTopic || !T.end) return;
+  const secs = Math.round((T.end - Date.now()) / 1000);
+  if (secs < 11) { ntfyCancel(); return; }                      // ntfy.sh: Mindestverzögerung 10 s
+  const at = T.end;
+  T.ntfy = 'pending'; T.ntfyAt = at; persistTimer();
+  try {
+    // gleiche Sequenz-ID "rest" → ersetzt eine noch nicht zugestellte, vorher geplante Mitteilung
+    const r = await ntfyPost('/rest', T.body || 'Weiter geht’s!', { 'X-Delay': secs + 's', 'X-Title': hdrEnc('Pause vorbei 💪'), 'X-Tags': 'stopwatch', 'X-Priority': '4' });
+    if (T.ntfyAt === at && T.ntfy === 'pending') T.ntfy = r.ok ? 'scheduled' : 'error';
+  } catch (e) { if (T.ntfyAt === at) T.ntfy = 'error'; }
+  persistTimer();
+}
+function ntfyCancel() {
+  const S = state.settings;
+  // nur stornieren, solange sie noch nicht zugestellt wurde (DELETE danach würde die zugestellte Mitteilung entfernen)
+  if (!T.ntfy || T.ntfy === 'cancelled' || !S.ntfyTopic || Date.now() > T.ntfyAt - 500) return;
+  T.ntfy = 'cancelled'; persistTimer();
+  try { fetch(`${NTFY}/${S.ntfyTopic}/rest`, { method: 'DELETE', keepalive: true }).catch(() => {}); } catch (e) {}
+}
 
 /* ---------- Bildschirm anlassen ---------- */
 let wakeLock = null;
@@ -908,7 +1067,7 @@ async function requestWakeLock() {
   try { wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
 }
 function releaseWakeLock() { try { wakeLock && wakeLock.release(); } catch (e) {} wakeLock = null; }
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { requestWakeLock(); tickTimer(); } });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { requestWakeLock(); tickTimer(); } else persistTimer(); });
 
 /* ---------- Export / Import ---------- */
 function backupJSON() { return JSON.stringify({ app: 'nico-gym', version: 1, exportedAt: new Date().toISOString(), data: state }, null, 2); }
@@ -980,9 +1139,21 @@ const A = {
     if (!T.end) return; const d = +el.dataset.v;
     if (T.alerted) { if (d > 0) startTimer(d); return; }
     T.end += d * 1000; T.total = Math.max(T.total + d, 1); if (T.end <= Date.now()) T.end = Date.now() + 300; persistTimer(); tickTimer();
+    clearTimeout(T.reschedT); T.reschedT = setTimeout(ntfySchedule, 600);   // mehrfaches Tippen bündeln
   },
   tStop: () => stopTimer(),
-  step: el => { const { ex } = ctx(el); const L = lib(ex.name); L.step = (L.step || 2.5) === 2.5 ? 0.5 : 2.5; save(); rerenderCard(ex); toast(`Schrittweite ${fmtN(L.step)} kg`); },
+  notifAllow: async () => { closeSheet(); await askNotifPermission(); if (ui.tab === 'more') render(true); },
+  notifTest: async () => { const ok = await showRestNotification('Test: So sieht die Mitteilung bei Pausenende aus.', 'Gym · Test'); toast(ok ? 'Test-Mitteilung gesendet' : 'Mitteilung nicht möglich'); },
+  ntfySetup: () => { state.settings.ntfyTopic = state.settings.ntfyTopic || newTopic(); state.settings.ntfy = true; save(); render(true); },
+  ntfyOff: async () => { if (!(await ask('Hintergrund-Mitteilung entfernen?', 'Das Thema wird gelöscht. In der ntfy-App kannst du das Abo danach ebenfalls löschen.', 'Entfernen', true))) return; ntfyCancel(); state.settings.ntfy = false; state.settings.ntfyTopic = null; save(); render(true); },
+  ntfyCopy: async () => { try { await navigator.clipboard.writeText(state.settings.ntfyTopic); toast('Thema kopiert ✓'); } catch (e) { const i = $('#ntfyTopic'); i.select(); toast('Thema markiert – jetzt kopieren'); } },
+  ntfyTest: async () => {
+    try {
+      const r = await ntfyPost('/test', 'Test: Diese Mitteilung kam 15 s nach dem Tippen – auch bei gesperrtem Handy.', { 'X-Delay': '15s', 'X-Title': hdrEnc('Gym · Test 💪'), 'X-Tags': 'stopwatch', 'X-Priority': '4' });
+      toast(r.ok ? 'Test kommt in 15 s – jetzt ruhig das Handy sperren' : 'Senden fehlgeschlagen (' + r.status + ')');
+    } catch (e) { toast('Keine Verbindung zu ntfy.sh'); }
+  },
+  step: el => { const { ex } = ctx(el); const L = lib(ex.name); L.step = (L.step || DEFAULT_STEP) === 0.5 ? 2.5 : 0.5; save(); rerenderCard(ex); toast(`Schrittweite ${fmtN(L.step)} kg`); },
   inc: el => adjust(el, 1), dec: el => adjust(el, -1),
   toggleDone: el => {
     const { ex, set, row } = ctx(el); unlockAudio();
@@ -992,7 +1163,14 @@ const A = {
     const wasComplete = $('#ex-' + ex.id).classList.contains('complete');
     rerenderCard(ex); save();
     if (set.done) {
-      startTimer(state.settings.rest);
+      startTimer(state.settings.rest, nextSetText(ex));
+      // Einmalig fragen, ob Mitteilungen bei Pausenende erlaubt werden sollen (Erlauben-Tipp = nötige Nutzergeste für iOS)
+      if (notifSupported() && notifPerm() === 'default' && !state.settings.notifAsked) {
+        state.settings.notifAsked = true; save();
+        setTimeout(() => openSheet(() => `<h3>🔔 Mitteilung bei Pausenende?</h3>
+          <p>Wenn die Pause vorbei ist, schickt dir die App eine Mitteilung – praktisch, wenn du gerade nicht aufs Display schaust.</p>
+          <div class="row"><button class="btn grow" data-a="sheetNo">Später</button><button class="btn grow primary" data-a="notifAllow">Erlauben</button></div>`), 250);
+      }
       if (!wasComplete && ex.sets.every(s => s.done)) {
         const i = state.active.ex.indexOf(ex), next = state.active.ex.slice(i + 1).find(e => !e.skipped && !e.sets.every(s => s.done));
         if (next) setTimeout(() => { const n = $('#ex-' + next.id); n && n.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 400);
@@ -1080,7 +1258,7 @@ function moveEx(id, d) {
 function adjust(el, dir) {
   const { ex, set, row } = ctx(el); const f = el.dataset.f; const L = lib(ex.name);
   const inp = row.querySelector(`[data-in=${f}]`); commitInput(inp);
-  if (f === 'w') set.w = round(Math.max(L.bw ? -100 : 0, (+set.w || 0) + dir * (L.step || 2.5)));
+  if (f === 'w') set.w = round(Math.max(L.bw ? -100 : 0, (+set.w || 0) + dir * (L.step || DEFAULT_STEP)));
   else set.r = Math.max(0, (+set.r || 0) + dir);
   inp.value = f === 'w' ? fmtN(set.w) : set.r; save();
 }
@@ -1117,7 +1295,7 @@ document.addEventListener('change', e => {
     if (v != null) { S[k] = v; if (S.bandLo > S.bandHi) [S.bandLo, S.bandHi] = [S.bandHi, S.bandLo]; save(); }
     render(true);
   }
-  else if (k.startsWith('set_')) { state.settings[k.slice(4)] = el.checked; save(); if (k === 'set_wakeLock') el.checked ? requestWakeLock() : releaseWakeLock(); }
+  else if (k.startsWith('set_')) { state.settings[k.slice(4)] = el.checked; save(); if (k === 'set_wakeLock') el.checked ? requestWakeLock() : releaseWakeLock(); if (k === 'set_ntfy') { if (el.checked) ntfySchedule(); else ntfyCancel(); } }
 });
 document.addEventListener('focusin', e => { if (e.target.matches('.stepper input:not([readonly])')) setTimeout(() => { try { e.target.select(); } catch (_) {} }, 0); });
 document.addEventListener('keydown', e => {
@@ -1147,7 +1325,18 @@ window.addEventListener('storage', e => { if (e.key === KEY) { load(); render(tr
   } catch (e) {}
   // Optionaler Service Worker (sw.js neben index.html): macht die App beim Hosting voll offline-fähig.
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
-    window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+    let hadController = !!navigator.serviceWorker.controller, pendingReload = false;
+    const reloadNow = () => { if (!window.__gymReloading) { window.__gymReloading = true; persistTimer(); location.reload(); } };
+    // Neue Version aktiv → neu laden (Daten liegen in localStorage, nichts geht verloren)
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController) { hadController = true; return; }
+      const typing = document.activeElement && /INPUT|TEXTAREA/.test(document.activeElement.tagName);
+      if (typing || !$('#sheetWrap').hidden) pendingReload = true; else reloadNow();
+    });
+    document.addEventListener('visibilitychange', () => { if (pendingReload && document.visibilityState === 'hidden') reloadNow(); });
+    window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').then(reg => {
+      document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => {}); });
+    }).catch(() => {}));
   }
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 })();
@@ -1158,7 +1347,144 @@ if (state.active) ui.tab = 'train';
 render();
 restoreTimer();
 requestWakeLock();
-window.__gym = { get state() { return state; }, ui, suggest, performances };
+window.__gym = { get state() { return state; }, ui, suggest, performances, T, startTimer, nextSetText };
+
+/* ---------- Sortieren per Gedrückthalten & Ziehen (Touch + Maus) ---------- */
+// Gilt für alle Listen mit [data-sort-list] und Einträgen [data-sort-item]:
+//  - "session": Übungen im laufenden Training  - "plan": Übungen im Trainingstag-Editor
+// Normales Scrollen bleibt unberührt: Erst nach ~380 ms ruhigem Halten wird gezogen,
+// wer vorher den Finger bewegt (> 10 px), scrollt ganz normal.
+const DRAG = { t: null, pressT: null, item: null, list: null, active: false, ph: null, x: 0, y: 0, sx: 0, sy: 0, dy: 0, from: -1, raf: 0, lastTouch: 0, suppressUntil: 0, scroller: null };
+const DRAG_DELAY = 380, DRAG_SLOP = 10;
+const DRAG_NOSTART = 'input,textarea,select,button,a,label,.stepper,.check';
+
+const dragItems = list => [...list.children].filter(el => el.hasAttribute('data-sort-item'));
+function dragScroller(list) { return list.closest('.sheet') || null; }   // null = Fenster
+function dragScrollBy(sc, dy) { if (!dy) return; if (sc) sc.scrollTop += dy; else window.scrollBy(0, dy); }
+function dragBounds(sc) {
+  if (sc) { const r = sc.getBoundingClientRect(); return { top: r.top + 60, bottom: r.bottom - 60 }; }
+  const head = $('#top').getBoundingClientRect().bottom, nav = $('#nav').getBoundingClientRect().top;
+  return { top: head + 60, bottom: nav - 60 };
+}
+
+function dragStart(target, x, y, input) {
+  if (DRAG.active) return;
+  dragCancelPress();
+  const item = target && target.closest && target.closest('[data-sort-item]');
+  if (!item || target.closest(DRAG_NOSTART)) return;
+  const list = item.closest('[data-sort-list]'); if (!list || dragItems(list).length < 2) return;
+  Object.assign(DRAG, { item, list, sx: x, sy: y, x, y, input });
+  DRAG.pressT = setTimeout(() => item.classList.add('pressing'), 140);
+  DRAG.t = setTimeout(dragActivate, DRAG_DELAY);
+}
+function dragCancelPress() {
+  clearTimeout(DRAG.t); clearTimeout(DRAG.pressT); DRAG.t = DRAG.pressT = null;
+  if (DRAG.item && !DRAG.active) { DRAG.item.classList.remove('pressing'); DRAG.item = null; DRAG.input = null; }
+}
+function dragActivate() {
+  DRAG.t = null;
+  const { item, list } = DRAG;
+  if (!item || !item.isConnected) { dragCancelPress(); return; }
+  item.classList.remove('pressing');
+  DRAG.active = true; DRAG.suppressUntil = Infinity;
+  try { navigator.vibrate && navigator.vibrate(12); } catch (e) {}
+  try { window.getSelection && window.getSelection().removeAllRanges(); } catch (e) {}
+  DRAG.from = dragItems(list).indexOf(item);
+  DRAG.scroller = dragScroller(list);
+  list.classList.add('sorting'); document.body.classList.add('dragActive');
+  // Kompaktansicht: gezogenen Eintrag unter den Finger scrollen
+  let r = item.getBoundingClientRect();
+  dragScrollBy(DRAG.scroller, Math.round(r.top + r.height / 2 - DRAG.y));
+  r = item.getBoundingClientRect();
+  const ph = document.createElement(item.tagName === 'LI' ? 'li' : 'div');
+  ph.className = 'drag-ph'; ph.style.height = r.height + 'px'; ph.style.marginBottom = getComputedStyle(item).marginBottom;
+  list.insertBefore(ph, item);
+  DRAG.ph = ph; DRAG.dy = Math.min(Math.max(DRAG.y - r.top, 10), r.height - 10);
+  Object.assign(item.style, { position: 'fixed', left: r.left + 'px', top: (DRAG.y - DRAG.dy) + 'px', width: r.width + 'px', height: r.height + 'px', margin: '0' });
+  item.classList.add('dragging');
+  dragLoop();
+}
+function dragMove(x, y) {
+  DRAG.x = x; DRAG.y = y;
+  if (!DRAG.active) {
+    if (DRAG.t && Math.hypot(x - DRAG.sx, y - DRAG.sy) > DRAG_SLOP) dragCancelPress();   // = Scrollen
+    return;
+  }
+  DRAG.item.style.top = (y - DRAG.dy) + 'px';
+  dragReorder();
+}
+function dragReorder() {
+  const { list, ph, item, y } = DRAG;
+  const others = dragItems(list).filter(el => el !== item);
+  let before = null;
+  for (const el of others) { const r = el.getBoundingClientRect(); if (y < r.top + r.height / 2) { before = el; break; } }
+  let next = ph.nextElementSibling; if (next === item) next = next.nextElementSibling;
+  if (next !== before) list.insertBefore(ph, before);   // before = null → ans Ende
+}
+function dragLoop() {
+  if (!DRAG.active) return;
+  const b = dragBounds(DRAG.scroller); let v = 0;
+  if (DRAG.y < b.top) v = -Math.min(16, (b.top - DRAG.y) / 3 + 2);
+  else if (DRAG.y > b.bottom) v = Math.min(16, (DRAG.y - b.bottom) / 3 + 2);
+  if (v) { dragScrollBy(DRAG.scroller, Math.round(v)); dragReorder(); }
+  DRAG.raf = requestAnimationFrame(dragLoop);
+}
+function dragEnd() {
+  if (!DRAG.active) { dragCancelPress(); return; }
+  cancelAnimationFrame(DRAG.raf);
+  const { item, ph, list, from } = DRAG;
+  const keepTop = item.getBoundingClientRect().top;
+  ph.replaceWith(item);
+  item.removeAttribute('style'); item.classList.remove('dragging');
+  list.classList.remove('sorting'); document.body.classList.remove('dragActive');
+  DRAG.active = false; DRAG.item = null; DRAG.ph = null; DRAG.input = null;
+  DRAG.suppressUntil = Date.now() + 400; DRAG.suppressOnce = true;   // nur den einen Klick, den das Loslassen evtl. erzeugt
+  const to = dragItems(list).indexOf(item);
+  onSortDrop(list.dataset.sortList, list, item, from, to, keepTop);
+}
+function onSortDrop(kind, list, item, from, to, keepTop) {
+  if (kind === 'session' && state.active) {
+    if (from !== to) {
+      const ids = dragItems(list).map(el => el.dataset.ex);
+      state.active.ex.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
+      toast(`${findEx(item.dataset.ex).name} verschoben`);
+    }
+    state.settings.dragHintSeen = true; save();
+    render(true);
+    const el = $('#ex-' + item.dataset.ex);
+    if (el) window.scrollBy(0, el.getBoundingClientRect().top - Math.max(keepTop, $('#top').getBoundingClientRect().bottom + 8));
+  } else if (kind === 'plan' && planDraft) {
+    keepPlanTitle();
+    planDraft.ex = dragItems(list).map(li => li.dataset.n);
+    const sc = $('#sheet'), st = sc.scrollTop; refreshSheet(); sc.scrollTop = st;
+  }
+}
+
+// Touch (iPhone): touchmove muss nicht-passiv sein, damit preventDefault() das Scrollen während des Ziehens stoppt.
+document.addEventListener('touchstart', e => {
+  DRAG.lastTouch = Date.now();
+  if (e.touches.length !== 1) { if (DRAG.active) dragEnd(); else dragCancelPress(); return; }
+  const t = e.touches[0]; dragStart(e.target, t.clientX, t.clientY, 'touch');
+}, { passive: true });
+document.addEventListener('touchmove', e => {
+  const t = e.touches[0]; if (!t) return;
+  if (DRAG.input !== 'touch') return;
+  if (DRAG.active) { e.preventDefault(); dragMove(t.clientX, t.clientY); }
+  else if (DRAG.t) dragMove(t.clientX, t.clientY);
+}, { passive: false });
+document.addEventListener('touchend', e => { DRAG.lastTouch = Date.now(); if (DRAG.input !== 'touch') return; if (DRAG.active && e.cancelable) e.preventDefault(); dragEnd(); }, { passive: false });
+document.addEventListener('touchcancel', () => { if (DRAG.input === 'touch') dragEnd(); });
+// Maus (Desktop) – emulierte Mausereignisse nach Touch ignorieren
+document.addEventListener('mousedown', e => { if (e.button === 0 && !DRAG.active && Date.now() - DRAG.lastTouch > 1000) dragStart(e.target, e.clientX, e.clientY, 'mouse'); });
+document.addEventListener('mousemove', e => { if (DRAG.input !== 'mouse') return; if (DRAG.active) e.preventDefault(); if (DRAG.active || DRAG.t) dragMove(e.clientX, e.clientY); });
+document.addEventListener('mouseup', () => { if (DRAG.input === 'mouse') dragEnd(); });
+// Nach dem Ablegen keinen versehentlichen Klick auslösen; kein Kontextmenü/Textauswahl beim Halten
+document.addEventListener('click', e => {
+  if (DRAG.active || (DRAG.suppressOnce && Date.now() < DRAG.suppressUntil)) { DRAG.suppressOnce = false; e.stopPropagation(); e.preventDefault(); }
+}, true);
+document.addEventListener('contextmenu', e => { if (DRAG.t || DRAG.active) e.preventDefault(); });
+document.addEventListener('selectstart', e => { if (DRAG.t || DRAG.active) e.preventDefault(); });
+window.addEventListener('blur', () => { if (DRAG.active) dragEnd(); else dragCancelPress(); });
 
 </script>
 </body>
