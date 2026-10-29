@@ -450,13 +450,13 @@ function ask(title, text, ok = 'OK', danger = false) {
     sheetResolve = res;
   });
 }
-function askText(title, value = '', placeholder = '', multiline = false) {
+function askText(title, value = '', placeholder = '', multiline = false, okLabel = 'Speichern') {
   return new Promise(res => {
     openSheet(() => `<h3>${esc(title)}</h3>
       ${multiline ? `<textarea class="inp" id="askIn" placeholder="${esc(placeholder)}">${esc(value)}</textarea>`
                   : `<input class="inp" id="askIn" value="${esc(value)}" placeholder="${esc(placeholder)}">`}
       <div class="row" style="margin-top:14px"><button class="btn grow" data-a="sheetNo">Abbrechen</button>
-      <button class="btn grow primary" data-a="sheetOk">Speichern</button></div>`);
+      <button class="btn grow primary" data-a="sheetOk">${esc(okLabel)}</button></div>`);
     sheetResolve = res;
     setTimeout(() => { const i = $('#askIn'); if (i) i.focus(); }, 60);
   });
@@ -872,7 +872,7 @@ function viewBW() {
 }
 
 /* ----- Mehr / Einstellungen ----- */
-const APP_VERSION = '1.2';
+const APP_VERSION = '1.2.1';
 function notifSection() {
   const S = state.settings, p = notifPerm();
   const st = {
@@ -935,13 +935,18 @@ function syncSection() {
   let h = `<h2>Sync & Dashboard</h2><div class="card">
     <div class="row between"><span style="font-weight:600">Status</span><span id="syncStatus" style="font-weight:700">${syncStatusText()}</span></div>`;
   if (!c.key) {
-    h += `<p class="small muted" style="margin:10px 0 12px">Mit dem Sync-Schlüssel werden deine Trainings automatisch auf deinem eigenen Server gesichert (Cloudflare) und dein persönliches Dashboard kann sie lesen. Die App funktioniert weiter offline – hochgeladen wird, sobald Internet da ist.</p>
-      <input class="inp" id="syncKeyIn" placeholder="Sync-Schlüssel oder Link einfügen" autocomplete="off" autocapitalize="off" spellcheck="false" style="font-family:ui-monospace,Menlo,monospace;font-size:14px">
-      <div class="row" style="margin-top:10px">${navigator.clipboard && navigator.clipboard.readText ? '<button class="btn grow" data-a="syncPaste">Einfügen</button>' : ''}<button class="btn grow primary" data-a="syncConnect">Verbinden</button></div>`;
+    h += `<p class="small muted" style="margin:10px 0 12px">Ein Tipp auf <b style="color:var(--text)">Verbinden</b> – dann werden deine Trainings automatisch auf deinem eigenen Server gesichert (Cloudflare) und dein persönliches Dashboard kann sie lesen. Der Schlüssel entsteht auf diesem Handy und bleibt hier. Die App funktioniert weiter offline.</p>
+      <button class="btn block primary big" data-a="syncClaimBtn">☁️ Verbinden</button>
+      <button class="btn block ghost sm" style="margin-bottom:0" data-a="syncCodeAsk">Weiteres Gerät? Kopplungscode eingeben</button>`;
+  } else if (c.lastErr === 'unclaimed') {
+    h += `<p class="small muted" style="margin:10px 0 12px">Der Sync-Server wurde zurückgesetzt. Tippe auf Verbinden, um ihn wieder mit diesem Handy zu verbinden (deine Daten bleiben erhalten).</p>
+      <button class="btn block primary big" data-a="syncClaimBtn">☁️ Wieder verbinden</button>
+      <button class="btn block danger" data-a="syncOff">Sync trennen</button>`;
   } else {
     h += `<p class="small muted" style="margin:10px 0 12px">Änderungen werden automatisch hochgeladen (nach ein paar Sekunden, beim Öffnen und beim Schließen der App).</p>
       <button class="btn block" data-a="syncNowBtn">↻ Jetzt synchronisieren</button>
       <button class="btn block" data-a="syncRestore">⬇︎ Daten vom Server laden</button>
+      <button class="btn block" data-a="syncPairNew">＋ Weiteres Gerät koppeln</button>
       <button class="btn block danger" data-a="syncOff">Sync trennen</button>`;
   }
   return h + `</div>`;
@@ -984,7 +989,8 @@ function viewMore() {
 
 /* ---------- Sync & Push-Server (Cloudflare Worker) ---------- */
 // localStorage bleibt die Quelle der Wahrheit. Änderungen werden gebündelt hochgeladen, sobald online.
-// Der Sync-Schlüssel steht NICHT im Quellcode, sondern wird einmal pro Gerät eingegeben/gekoppelt.
+// Kein Geheimnis verlässt die Box/den Chat: Das Handy erzeugt seinen Schlüssel selbst (256 bit) und beansprucht
+// damit einmalig den Speicher („Claim“). Der Server speichert nur einen Hash. Weitere Geräte per Kopplungscode.
 const SYNC_URL = 'https://gym-sync.nicojtn.workers.dev';
 const VAPID_PUBLIC = 'BCGyx4zpLOMBIFjkG9hRZTCOq6rppUKcADemrKggZFA2LRVUniT1bh_acarAkdxsDTwtrrYRID6toSZWsB6IMWE';
 const SYNC_KEY = KEY + '.sync';
@@ -994,14 +1000,45 @@ function syncCfg() {
   if (!SYNC) { try { SYNC = JSON.parse(localStorage.getItem(SYNC_KEY) || 'null'); } catch (e) {} }
   if (!SYNC || typeof SYNC !== 'object') SYNC = {};
   if (!SYNC.device) { SYNC.device = 'd-' + uid(); syncSaveCfg(); }
+  if (SYNC.key && !/^gk_/.test(SYNC.key)) { SYNC.key = null; SYNC.rev = null; syncSaveCfg(); }   // alte v1.2-Schlüssel gelten nicht mehr
   return SYNC;
 }
 function syncSaveCfg() { try { localStorage.setItem(SYNC_KEY, JSON.stringify(SYNC)); } catch (e) {} }
 const syncOn = () => !!syncCfg().key;
 const hashStr = s => { let h = 0x811c9dc5; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); } return (h >>> 0).toString(36) + ':' + s.length; };
-function parseSyncKey(s) {
-  s = String(s || '').trim(); const m = s.match(/#sync=([A-Za-z0-9_-]+)/) || s.match(/^(gw_[A-Za-z0-9_-]{20,})$/);
-  return m ? m[1] : null;
+/** 256-bit-Zufallsschlüssel, entsteht nur auf diesem Gerät */
+function genKey() { const b = crypto.getRandomValues(new Uint8Array(32)); return 'gk_' + btoa(String.fromCharCode(...b)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+/** Schlüssel für dieses Gerät: vorhandenen (pausiert/angefangen) wiederverwenden, sonst neu erzeugen. Vorher speichern → verlorene Antwort ist harmlos. */
+function syncDeviceKey() { const c = syncCfg(); if (!c.pendingKey) { c.pendingKey = c.key || c.parked || genKey(); syncSaveCfg(); } return c.pendingKey; }
+async function syncPost(path, body) {
+  const r = await fetch(SYNC_URL + path, { method: 'POST', body: JSON.stringify({ device: syncCfg().device, ...body }), headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, mode: 'cors', credentials: 'omit', cache: 'no-store' });
+  let j = null; try { j = await r.json(); } catch (e) {} return { status: r.status, ok: r.ok, j: j || {} };
+}
+/** „Verbinden“: Speicher für dieses Handy beanspruchen */
+async function syncClaim() {
+  if (!window.crypto || !crypto.getRandomValues) { toast('Dieses Gerät kann keinen sicheren Schlüssel erzeugen'); return false; }
+  const key = syncDeviceKey();
+  let r; try { r = await syncPost('/v1/claim', { key }); } catch (e) { toast('Keine Verbindung zum Sync-Server'); return false; }
+  if (r.status === 409) { syncAlreadyClaimed(); return false; }
+  if (!r.ok) { toast('Verbinden fehlgeschlagen (' + r.status + ')'); return false; }
+  return syncActivate(key);
+}
+/** Zweites Gerät: Kopplungscode vom schon verbundenen Gerät */
+async function syncRedeem(code) {
+  const key = syncDeviceKey();
+  let r; try { r = await syncPost('/v1/pair/redeem', { key, code }); } catch (e) { toast('Keine Verbindung zum Sync-Server'); return false; }
+  if (!r.ok) { toast(r.j.error === 'wrong code' ? `Code falsch – noch ${r.j.triesLeft} Versuche` : r.j.error === 'not claimed' ? 'Noch kein Gerät verbunden – einfach „Verbinden“ tippen' : 'Code abgelaufen – auf dem anderen Gerät neu erzeugen'); return false; }
+  return syncActivate(key);
+}
+async function syncActivate(key) {
+  const c = syncCfg(); c.pendingKey = null; c.parked = null; syncSaveCfg();
+  return syncPair(key);
+}
+function syncAlreadyClaimed() {
+  openSheet(() => `<h3>☁️ Schon verbunden</h3>
+    <p>Dein Sync-Server ist bereits mit einem anderen Gerät verbunden. Zum Hinzufügen dieses Geräts auf dem verbundenen Gerät unter <b>Mehr → Sync & Dashboard → Weiteres Gerät koppeln</b> einen Code erzeugen und hier eingeben.</p>
+    <button class="btn block primary" data-a="syncCodeAsk">Kopplungscode eingeben</button>
+    <button class="btn block" data-a="sheetClose">Schließen</button>`);
 }
 /** POST als „einfache“ Anfrage (text/plain, Schlüssel im Body) → kein CORS-Preflight, funktioniert auch mit keepalive */
 async function syncApi(path, body = {}, { keepalive = false, timeout = 12000 } = {}) {
@@ -1036,7 +1073,7 @@ async function syncNow({ force = false, keepalive = false } = {}) {
     else if (r.status === 409) {
       if (r.j.device === c.device) { syncBusy = false; return syncNow({ force: true }); }   // eigene Änderung, Antwort ging verloren
       res = 'conflict'; c.lastErr = 'conflict'; setTimeout(() => syncConflict(r.j), 50);
-    } else if (r.status === 401 || r.status === 403) { res = 'auth'; c.lastErr = 'Schlüssel ungültig'; }
+    } else if (r.status === 401 || r.status === 403) { res = 'auth'; c.lastErr = r.j.unclaimed ? 'unclaimed' : 'Schlüssel ungültig'; }
     else c.lastErr = 'Server-Fehler ' + r.status;
   } catch (e) { c.lastErr = navigator.onLine === false ? null : 'Keine Verbindung'; res = 'neterr'; }
   syncSaveCfg(); syncBusy = false;
@@ -1048,7 +1085,8 @@ function syncStatusText() {
   const c = syncCfg();
   if (!c.key) return '<span class="muted">Nicht verbunden</span>';
   if (c.lastErr === 'conflict') return '<span class="outband">Bitte Daten wählen</span>';
-  if (c.lastErr === 'Schlüssel ungültig') return '<span style="color:var(--red)">Schlüssel ungültig</span>';
+  if (c.lastErr === 'unclaimed') return '<span class="outband">Server zurückgesetzt</span>';
+  if (c.lastErr === 'Schlüssel ungültig') return '<span style="color:var(--red)">Nicht mehr berechtigt</span>';
   const t = c.lastOk ? new Date(c.lastOk).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : null;
   if (c.pending || c.lastErr) return `<span class="outband">${navigator.onLine === false ? 'Offline' : esc(c.lastErr || 'Wartet')} – wird nachgeholt</span>`;
   return `<span class="inband">Synchron ✓${t ? ' · ' + t : ''}</span>`;
@@ -1717,11 +1755,24 @@ window.addEventListener('blur', () => { if (DRAG.active) dragEnd(); else dragCan
 
 /* ---------- v1.2: Sync & Push – Aktionen und Start ---------- */
 Object.assign(A, {
-  syncPaste: async () => { try { const t = await navigator.clipboard.readText(); $('#syncKeyIn').value = t.trim(); } catch (e) { toast('Einfügen nicht erlaubt – lange ins Feld tippen → Einsetzen'); } },
-  syncConnect: async el => {
-    const k = parseSyncKey($('#syncKeyIn').value); if (!k) { toast('Das ist kein gültiger Sync-Schlüssel'); return; }
+  syncClaimBtn: async el => {
     el.disabled = true; el.textContent = 'Verbinde …';
-    await syncPair(k); if (ui.tab === 'more') render(true);
+    await syncClaim(); if (ui.tab === 'more') render(true);
+  },
+  syncCodeAsk: async () => {
+    const code = await askText('Kopplungscode vom verbundenen Gerät', '', 'z. B. K7QM-2XRA', false, 'Verbinden');
+    if (!code) return;
+    if (await syncRedeem(code)) { if (ui.tab === 'more') render(true); }
+  },
+  syncPairNew: async () => {
+    let r; try { r = await syncApi('/v1/pair/create'); } catch (e) { toast('Keine Verbindung zum Sync-Server'); return; }
+    if (!r.ok) { toast('Code konnte nicht erzeugt werden (' + r.status + ')'); return; }
+    const until = new Date(r.j.expiresAt).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+    openSheet(() => `<h3>Weiteres Gerät koppeln</h3>
+      <p>Auf dem neuen Gerät die Gym-App öffnen → <b>Mehr → Sync & Dashboard → Kopplungscode eingeben</b>:</p>
+      <div style="font-size:34px;font-weight:700;letter-spacing:.12em;text-align:center;font-variant-numeric:tabular-nums;margin:8px 0 6px;text-shadow:var(--tglow)">${esc(r.j.code)}</div>
+      <p class="small" style="text-align:center">Gültig bis ${until} Uhr · nur einmal verwendbar</p>
+      <button class="btn block" data-a="sheetClose">Fertig</button>`);
   },
   syncNowBtn: async el => {
     el.disabled = true; const r = await syncNow({ force: true }); el.disabled = false;
@@ -1736,7 +1787,7 @@ Object.assign(A, {
   },
   syncOff: async () => {
     if (!(await ask('Sync trennen?', 'Deine Daten bleiben auf diesem Gerät. Es wird nichts mehr hochgeladen, und Push bei gesperrtem Handy geht nicht mehr.', 'Trennen', true))) return;
-    await pushDisable(); const c = syncCfg(); Object.assign(c, { key: null, rev: null, hash: null, lastOk: null, lastErr: null, pending: false }); syncSaveCfg();
+    await pushDisable(); const c = syncCfg(); Object.assign(c, { parked: c.key, key: null, rev: null, hash: null, lastOk: null, lastErr: null, pending: false }); syncSaveCfg();
     render(true); toast('Sync getrennt');
   },
   syncUseServer: async () => {
@@ -1746,8 +1797,6 @@ Object.assign(A, {
   },
   syncUseLocal: async () => { syncConflictOpen = false; closeSheet(); const r = await syncNow({ force: true }); toast(r === 'ok' ? 'Hochgeladen ✓' : 'Hochladen fehlgeschlagen'); if (ui.tab === 'more') render(true); },
   syncLater: () => { syncConflictOpen = false; closeSheet(); },
-  syncCopyKey: async el => { try { await navigator.clipboard.writeText(el.dataset.k); toast('Schlüssel kopiert ✓'); } catch (e) { const i = $('#pairKey'); i && i.select(); toast('Markiert – jetzt kopieren'); } },
-  syncPairHere: async el => { closeSheet(); await syncPair(el.dataset.k); render(true); },
   pushOn: async el => { el.disabled = true; await pushEnable(); render(true); },
   pushOff: async () => { await pushDisable(); render(true); toast('Push ausgeschaltet'); },
   pushTest: async () => {
@@ -1756,26 +1805,14 @@ Object.assign(A, {
   },
 });
 
-/* Kopplungslink: https://nicojtn.github.io/gym-tracker/#sync=SCHLÜSSEL */
-function pairFromHash() {
-  const k = parseSyncKey(location.hash); if (!k) return;
+/* Alte Kopplungslinks (#sync=…) aus v1.2 werden nicht mehr verwendet – Link-Inhalt sofort aus der Adresszeile entfernen */
+function dropOldPairLink() {
+  if (!/#sync=/.test(location.hash)) return;
   try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { location.hash = ''; }
-  if (syncCfg().key === k) { toast('Sync ist schon verbunden ✓'); return; }
-  // iPhone: Safari und die Home-Bildschirm-App haben getrennte Speicher → Schlüssel in die App übertragen
-  if (isIOS() && !isStandalone()) {
-    openSheet(() => `<h3>☁️ Sync-Schlüssel</h3>
-      <p>Auf dem iPhone muss der Schlüssel in die <b>App vom Home-Bildschirm</b> (Safari hat einen eigenen Speicher):</p>
-      <ol class="small" style="padding-left:20px;line-height:1.6;color:var(--text2)"><li>Unten auf <b>Kopieren</b> tippen.</li><li>Gym-App vom Home-Bildschirm öffnen → <b>Mehr</b> → <b>Sync & Dashboard</b>.</li><li><b>Einfügen</b> → <b>Verbinden</b>.</li></ol>
-      <input class="inp" id="pairKey" readonly value="${esc(k)}" style="font-family:ui-monospace,Menlo,monospace;font-size:13px">
-      <button class="btn block primary" style="margin-top:12px" data-a="syncCopyKey" data-k="${esc(k)}">Kopieren</button>
-      <button class="btn block ghost" data-a="syncPairHere" data-k="${esc(k)}">Doch hier in Safari verbinden</button>
-      <button class="btn block" data-a="sheetClose">Schließen</button>`);
-    return;
-  }
-  syncPair(k).then(() => { if (ui.tab === 'more') render(true); });
+  toast('Kopplungslinks gibt es nicht mehr – in der App: Mehr → Sync & Dashboard → Verbinden');
 }
-pairFromHash();
-window.addEventListener('hashchange', pairFromHash);
+dropOldPairLink();
+window.addEventListener('hashchange', dropOldPairLink);
 
 /* Automatischer Abgleich: beim Öffnen, wenn wieder online, beim Wegwechseln (sofort) */
 setTimeout(() => { if (syncOn()) syncNow(); pushRefresh(); }, 1200);
@@ -1785,7 +1822,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') { if (syncT) syncNow({ keepalive: true }); }
   else { syncNow(); pushRefresh(); }
 });
-window.__gym.sync = { syncCfg, syncNow, syncPair, pushEnable, pushSchedule, pushActive, get SYNC() { return SYNC; } };
+window.__gym.sync = { syncCfg, syncNow, syncPair, syncClaim, syncRedeem, genKey, pushEnable, pushSchedule, pushActive, get SYNC() { return SYNC; } };
 
 </script>
 </body>

@@ -1,6 +1,6 @@
 // Service Worker: speichert die App für Offline-Nutzung (Daten selbst liegen in localStorage)
 // und zeigt Push-Mitteilungen vom Sync-Server (Pausenende auch bei gesperrtem Handy).
-const CACHE = 'gym-v4';  // v1.2: Sync & Web Push
+const CACHE = 'gym-v5';  // v1.2.1: Sync per Claim (Schlüssel entsteht auf dem Handy)
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(['./', './index.html'])).then(() => self.skipWaiting()));
 });
